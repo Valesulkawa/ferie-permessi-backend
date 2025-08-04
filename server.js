@@ -69,7 +69,7 @@ const transporter = nodemailer.createTransport({
 // === LOGIN ADMIN JWT ===
 const JWT_SECRET = 'chiave_super_segreta';
 const ADMIN_EMAIL = 'daniele.rizzioli@gmail.com';
-const ADMIN_PASSWORD = 'password';
+const ADMIN_PASSWORD = '01o@JgpC!#@x^smu$*';
 
 app.post('/api/admin/login', (req, res) => {
   const { email, password } = req.body || {};
