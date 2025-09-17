@@ -315,85 +315,80 @@ app.get('/api/admin/report', requireAdmin, async (req, res) => {
     }
   }
 
-  // Workbook
+  // === Workbook: un solo foglio "Riepilogo" con mese testuale e stile ===
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Ferie/Permessi App';
   wb.created = new Date();
 
-  // Foglio Dettagli
-  const wsDet = wb.addWorksheet('Dettagli');
-  wsDet.columns = [
-    { header: 'Nome', key: 'nome', width: 20 },
-    { header: 'Data', key: 'data', width: 12 },
-    { header: 'Tipo', key: 'tipo', width: 12 },
-    { header: 'Ore assenza', key: 'ore', width: 14 },
-    { header: 'Note', key: 'note', width: 30 },
-  ];
+  const mesiIT = ['gennaio','febbraio','marzo','aprile','maggio','giugno','luglio','agosto','settembre','ottobre','novembre','dicembre'];
+  const meseTesto = `${mesiIT[mon - 1]} ${year}`;
 
-  // Foglio Riepilogo
-  const wsSum = wb.addWorksheet('Riepilogo');
-  wsSum.columns = [
-    { header: 'Nome', key: 'nome', width: 20 },
-    { header: 'Giorni lavorativi', key: 'giorni', width: 18 },
-    { header: 'Ore teoriche', key: 'oreTeo', width: 14 },
-    { header: 'Ferie (ore)', key: 'ferie', width: 12 },
-    { header: 'Permessi (ore)', key: 'permessi', width: 14 },
-    { header: 'Mutua (ore)', key: 'mutua', width: 12 },
-    { header: 'Ore lavorate', key: 'lavorate', width: 14 },
-  ];
+  // unico foglio
+  const ws = wb.addWorksheet('Riepilogo');
 
-  for (const [nome, agg] of perPersona.entries()) {
-    for (const r of agg.dettagli.sort((a,b)=>a.data.localeCompare(b.data))) {
-      wsDet.addRow(r);
+  // colonne dinamiche: Nome | Mese | 1..N | Ore lavorate | Ferie (ore) | Permessi (ore) | Mutua (ore)
+  const lastDay = new Date(Date.UTC(year, mon, 0)).getUTCDate();
+  const colDefs = [
+    { header: 'Nome', key: 'nome', width: 24 },
+    { header: 'Mese', key: 'mese', width: 18 },
+  ];
+  for (let i = 1; i <= lastDay; i++) colDefs.push({ header: String(i), key: `d${i}`, width: 6 });
+  colDefs.push({ header: 'Ore lavorate', key: 'oreLav', width: 14 });
+  colDefs.push({ header: 'Ferie (ore)', key: 'ferieOre', width: 12 });
+  colDefs.push({ header: 'Permessi (ore)', key: 'permOre', width: 14 });
+  colDefs.push({ header: 'Mutua (ore)', key: 'mutuaOre', width: 12 });
+  ws.columns = colDefs;
+
+  // helper per capire se giorno è lavorativo e se weekend
+  const isWeekend = (iso) => {
+    const d = new Date(iso + 'T00:00:00Z');
+    const dow = d.getUTCDay(); // 0=dom,6=sab
+    return dow === 0 || dow === 6;
+  };
+  const allISO = Array.from({ length: lastDay }, (_, i) => `${year}-${pad2(mon)}-${pad2(i + 1)}`);
+
+  // Intestazione: riempimento e bold
+  const header = ws.getRow(1);
+  header.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: 'FF1F2937' } };
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2F0D9' } }; // verde chiaro
+    cell.border = {
+      top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+      left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+      bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+      right: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+    };
+  });
+  ws.views = [{ state: 'frozen', xSplit: 2, ySplit: 1 }];
+
+  // Evidenzia colonne weekend in grigio
+  for (let i = 1; i <= lastDay; i++) {
+    const iso = allISO[i - 1];
+    if (isWeekend(iso)) {
+      const col = ws.getColumn(2 + i); // dopo Nome(1) e Mese(2)
+      col.eachCell((cell, row) => {
+        if (row === 1) return; // header già colorato
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3F4F6' } }; // grigio chiaro
+      });
     }
-    const ferieH = +(agg.ferieMin/60).toFixed(2);
-    const permH  = +(agg.permMin/60).toFixed(2);
-    const mutuaH = +(agg.mutuaMin/60).toFixed(2);
-    const oreTeo = oreTeorichePerPersona;
-    const lavorate = +(oreTeo - ferieH - permH - mutuaH).toFixed(2);
-    wsSum.addRow({
-      nome,
-      giorni: workdays.length,
-      oreTeo,
-      ferie: ferieH,
-      permessi: permH,
-      mutua: mutuaH,
-      lavorate
-    });
   }
 
-  // === Foglio Calendario (per giorno del mese) ===
-  const lastDay = new Date(Date.UTC(year, mon, 0)).getUTCDate();
-  const allDaysISO = Array.from({ length: lastDay }, (_, i) => `${year}-${pad2(mon)}-${pad2(i + 1)}`);
-  const isWorkday = (iso) => {
-    const d = new Date(iso + 'T00:00:00Z');
-    const dow = d.getUTCDay();
-    return dow >= 1 && dow <= 5 && !holidays.has(iso);
-  };
-
-  const wsCal = wb.addWorksheet('Calendario');
-  const calColumns = [
-    { header: 'Nome', key: 'nome', width: 24 },
-    { header: 'Mese', key: 'mese', width: 10 },
-  ];
-  for (let i = 1; i <= lastDay; i++) calColumns.push({ header: String(i), key: `d${i}`, width: 6 });
-  calColumns.push({ header: 'Ore lavorate', key: 'oreLav', width: 14 });
-  calColumns.push({ header: 'Ferie (ore)', key: 'ferieOre', width: 12 });
-  calColumns.push({ header: 'Permessi (ore)', key: 'permOre', width: 14 });
-  calColumns.push({ header: 'Mutua (ore)', key: 'mutuaOre', width: 12 });
-  wsCal.columns = calColumns;
-
+  // righe dati
   for (const [nome, agg] of perPersona.entries()) {
     const ferieH = +(agg.ferieMin / 60).toFixed(2);
     const permH  = +(agg.permMin  / 60).toFixed(2);
     const mutuaH = +(agg.mutuaMin / 60).toFixed(2);
-    const oreTeo = oreTeorichePerPersona;
+    const oreTeo = workdays.length * 8;
     const oreLav = +(oreTeo - ferieH - permH - mutuaH).toFixed(2);
 
-    const rowObj = { nome, mese: `${year}-${pad2(mon)}`, oreLav, ferieOre: ferieH, permOre: permH, mutuaOre: mutuaH };
+    const rowObj = { nome, mese: meseTesto, oreLav, ferieOre: ferieH, permOre: permH, mutuaOre: mutuaH };
     for (let i = 0; i < lastDay; i++) {
-      const iso = allDaysISO[i];
-      if (!isWorkday(iso)) { rowObj[`d${i + 1}`] = ''; continue; }
+      const iso = allISO[i];
+      const d = new Date(iso + 'T00:00:00Z');
+      const dow = d.getUTCDay();
+      // lascia vuoto weekend e festività
+      if (dow === 0 || dow === 6 || holidays.has(iso)) { rowObj[`d${i + 1}`] = ''; continue; }
       const mark = agg.byDay[iso] || {};
       if (mark.ferie) { rowObj[`d${i + 1}`] = 'FE'; continue; }
       if (mark.mutua) { rowObj[`d${i + 1}`] = 'MU'; continue; }
@@ -401,20 +396,47 @@ app.get('/api/admin/report', requireAdmin, async (req, res) => {
       const ore = Math.max(0, 8 - permMin / 60);
       rowObj[`d${i + 1}`] = +ore.toFixed(2);
     }
-    const added = wsCal.addRow(rowObj);
-    // number format for day columns and totals
+    const added = ws.addRow(rowObj);
+
+    // formato numerico per le ore
     for (let i = 3; i <= 2 + lastDay; i++) {
       const c = added.getCell(i);
       if (typeof c.value === 'number') c.numFmt = '0.00';
+      c.alignment = { horizontal: 'center', vertical: 'middle' };
     }
     added.getCell(2 + lastDay + 1).numFmt = '0.00'; // oreLav
     added.getCell(2 + lastDay + 2).numFmt = '0.00'; // ferieOre
     added.getCell(2 + lastDay + 3).numFmt = '0.00'; // permOre
     added.getCell(2 + lastDay + 4).numFmt = '0.00'; // mutuaOre
+
+    // Colora FE/MU: giallo e arancione
+    for (let i = 3; i <= 2 + lastDay; i++) {
+      const cell = added.getCell(i);
+      if (cell.value === 'FE') {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF59D' } }; // giallo
+      } else if (cell.value === 'MU') {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFCC80' } }; // arancione
+      }
+      cell.border = {
+        top: { style: 'hair' }, left: { style: 'hair' }, bottom: { style: 'hair' }, right: { style: 'hair' }
+      };
+    }
   }
 
+  // Se nessun dato, aggiungi riga vuota segnaposto
   if (perPersona.size === 0) {
-    wsSum.addRow({ nome: '—', giorni: workdays.length, oreTeo: oreTeorichePerPersona, ferie: 0, permessi: 0, mutua: 0, lavorate: oreTeorichePerPersona });
+    ws.addRow({ nome: '—', mese: meseTesto, oreLav: workdays.length * 8, ferieOre: 0, permOre: 0, mutuaOre: 0 });
+  }
+
+  // zebra stripes sulle righe dati
+  for (let r = 2; r <= ws.rowCount; r++) {
+    if (r % 2 === 0) {
+      ws.getRow(r).eachCell((cell) => {
+        if (!cell.fill) {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } }; // azzurrino chiaro
+        }
+      });
+    }
   }
 
   res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
