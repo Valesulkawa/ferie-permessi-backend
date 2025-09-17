@@ -326,10 +326,11 @@ app.get('/api/admin/report', requireAdmin, async (req, res) => {
   // unico foglio
   const ws = wb.addWorksheet('Riepilogo');
 
-  // colonne dinamiche: Nome | Mese | 1..N | Ore lavorate | Ferie (ore) | Permessi (ore) | Mutua (ore)
+  // colonne dinamiche: Nome | Riga | Mese | 1..N | Ore lavorate | Ferie (ore) | Permessi (ore) | Mutua (ore)
   const lastDay = new Date(Date.UTC(year, mon, 0)).getUTCDate();
   const colDefs = [
     { header: 'Nome', key: 'nome', width: 24 },
+    { header: 'Riga', key: 'tipo', width: 6 },   // O = ore lavorate, P = permessi
     { header: 'Mese', key: 'mese', width: 18 },
   ];
   for (let i = 1; i <= lastDay; i++) colDefs.push({ header: String(i), key: `d${i}`, width: 6 });
@@ -360,7 +361,7 @@ app.get('/api/admin/report', requireAdmin, async (req, res) => {
       right: { style: 'thin', color: { argb: 'FFCBD5E1' } },
     };
   });
-  ws.views = [{ state: 'frozen', xSplit: 2, ySplit: 1 }];
+  ws.views = [{ state: 'frozen', xSplit: 3, ySplit: 1 }];
 
   // Evidenzia colonne weekend in grigio
   for (let i = 1; i <= lastDay; i++) {
@@ -374,7 +375,7 @@ app.get('/api/admin/report', requireAdmin, async (req, res) => {
     }
   }
 
-  // righe dati
+  // righe dati (due righe per persona: O = ore lavorate, P = permessi)
   for (const [nome, agg] of perPersona.entries()) {
     const ferieH = +(agg.ferieMin / 60).toFixed(2);
     const permH  = +(agg.permMin  / 60).toFixed(2);
@@ -382,59 +383,80 @@ app.get('/api/admin/report', requireAdmin, async (req, res) => {
     const oreTeo = workdays.length * 8;
     const oreLav = +(oreTeo - ferieH - permH - mutuaH).toFixed(2);
 
-    const rowObj = { nome, mese: meseTesto, oreLav, ferieOre: ferieH, permOre: permH, mutuaOre: mutuaH };
+    // --- riga O (ore lavorate) ---
+    const rowObjO = { nome, tipo: 'O', mese: meseTesto, oreLav, ferieOre: ferieH, permOre: permH, mutuaOre: mutuaH };
+    // --- riga P (permessi) ---
+    const rowObjP = { nome: '', tipo: 'P', mese: '' };
+
+    let hasPermForMonth = false;
     for (let i = 0; i < lastDay; i++) {
       const iso = allISO[i];
       const d = new Date(iso + 'T00:00:00Z');
       const dow = d.getUTCDay();
-      // lascia vuoto weekend e festività
-      if (dow === 0 || dow === 6 || holidays.has(iso)) { rowObj[`d${i + 1}`] = ''; continue; }
+      // weekend o festività -> vuoto su entrambe
+      if (dow === 0 || dow === 6 || holidays.has(iso)) {
+        rowObjO[`d${i + 1}`] = '';
+        rowObjP[`d${i + 1}`] = '';
+        continue;
+      }
       const mark = agg.byDay[iso] || {};
-      if (mark.ferie) { rowObj[`d${i + 1}`] = 'FE'; continue; }
-      if (mark.mutua) { rowObj[`d${i + 1}`] = 'MU'; continue; }
+      if (mark.ferie) {
+        rowObjO[`d${i + 1}`] = 'FE';
+        rowObjP[`d${i + 1}`] = '';
+        continue;
+      }
+      if (mark.mutua) {
+        rowObjO[`d${i + 1}`] = 'MU';
+        rowObjP[`d${i + 1}`] = '';
+        continue;
+      }
       const permMin = mark.permMin || 0;
-      const ore = Math.max(0, 8 - permMin / 60);
+      const oreNum = Math.max(0, 8 - permMin / 60);
+      rowObjO[`d${i + 1}`] = +oreNum.toFixed(2);
       if (permMin > 0) {
-        // Mostra anche le ore di permesso nella cella, es. "5,50 (P2,50)"
-        const oreStr = ore.toFixed(2).replace('.', ',');
-        const permStr = (permMin / 60).toFixed(2).replace('.', ',');
-        rowObj[`d${i + 1}`] = {
-          richText: [
-            { text: oreStr, font: { bold: false } },
-            { text: ` (P${permStr})`, font: { color: { argb: 'FF9A3412' }, italic: true } }
-          ]
-        };
+        hasPermForMonth = true;
+        rowObjP[`d${i + 1}`] = +(permMin / 60).toFixed(2); // stesso formato decimale (2,50 = due ore e mezza)
       } else {
-        rowObj[`d${i + 1}`] = +ore.toFixed(2);
+        rowObjP[`d${i + 1}`] = '';
       }
     }
-    const added = ws.addRow(rowObj);
 
-    // formato numerico per le ore
-    for (let i = 3; i <= 2 + lastDay; i++) {
-      const c = added.getCell(i);
+    const rO = ws.addRow(rowObjO);
+    // formati numerici + allineamenti sulla riga O
+    for (let i = 4; i <= 3 + lastDay; i++) { // dopo Nome(1), Riga(2), Mese(3)
+      const c = rO.getCell(i);
       if (typeof c.value === 'number') c.numFmt = '0.00';
       c.alignment = { horizontal: 'center', vertical: 'middle' };
     }
-    added.getCell(2 + lastDay + 1).numFmt = '0.00'; // oreLav
-    added.getCell(2 + lastDay + 2).numFmt = '0.00'; // ferieOre
-    added.getCell(2 + lastDay + 3).numFmt = '0.00'; // permOre
-    added.getCell(2 + lastDay + 4).numFmt = '0.00'; // mutuaOre
+    rO.getCell(3 + lastDay + 1).numFmt = '0.00'; // oreLav
+    rO.getCell(3 + lastDay + 2).numFmt = '0.00'; // ferieOre
+    rO.getCell(3 + lastDay + 3).numFmt = '0.00'; // permOre
+    rO.getCell(3 + lastDay + 4).numFmt = '0.00'; // mutuaOre
 
-    // Colora FE/MU: giallo e arancione
-    for (let i = 3; i <= 2 + lastDay; i++) {
-      const cell = added.getCell(i);
+    // Colora FE/MU sulla riga O e bordi
+    for (let i = 4; i <= 3 + lastDay; i++) {
+      const cell = rO.getCell(i);
       if (cell.value === 'FE') {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF59D' } }; // giallo
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF59D' } };
       } else if (cell.value === 'MU') {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFCC80' } }; // arancione
-      } else if (cell.value && typeof cell.value === 'object' && cell.value.richText) {
-        // Giorno con permesso parziale
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } }; // ambra chiaro
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFCC80' } };
       }
-      cell.border = {
-        top: { style: 'hair' }, left: { style: 'hair' }, bottom: { style: 'hair' }, right: { style: 'hair' }
-      };
+      cell.border = { top: { style: 'hair' }, left: { style: 'hair' }, bottom: { style: 'hair' }, right: { style: 'hair' } };
+    }
+
+    // Aggiungi la riga P solo se ci sono permessi nel mese
+    if (hasPermForMonth) {
+      const rP = ws.addRow(rowObjP);
+      // formati e colorazione per i permessi
+      for (let i = 4; i <= 3 + lastDay; i++) {
+        const c = rP.getCell(i);
+        if (typeof c.value === 'number') {
+          c.numFmt = '0.00';
+          c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } }; // ambra chiaro
+        }
+        c.alignment = { horizontal: 'center', vertical: 'middle' };
+        c.border = { top: { style: 'hair' }, left: { style: 'hair' }, bottom: { style: 'hair' }, right: { style: 'hair' } };
+      }
     }
   }
 
