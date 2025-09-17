@@ -394,7 +394,19 @@ app.get('/api/admin/report', requireAdmin, async (req, res) => {
       if (mark.mutua) { rowObj[`d${i + 1}`] = 'MU'; continue; }
       const permMin = mark.permMin || 0;
       const ore = Math.max(0, 8 - permMin / 60);
-      rowObj[`d${i + 1}`] = +ore.toFixed(2);
+      if (permMin > 0) {
+        // Mostra anche le ore di permesso nella cella, es. "5,50 (P2,50)"
+        const oreStr = ore.toFixed(2).replace('.', ',');
+        const permStr = (permMin / 60).toFixed(2).replace('.', ',');
+        rowObj[`d${i + 1}`] = {
+          richText: [
+            { text: oreStr, font: { bold: false } },
+            { text: ` (P${permStr})`, font: { color: { argb: 'FF9A3412' }, italic: true } }
+          ]
+        };
+      } else {
+        rowObj[`d${i + 1}`] = +ore.toFixed(2);
+      }
     }
     const added = ws.addRow(rowObj);
 
@@ -416,6 +428,9 @@ app.get('/api/admin/report', requireAdmin, async (req, res) => {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF59D' } }; // giallo
       } else if (cell.value === 'MU') {
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFCC80' } }; // arancione
+      } else if (cell.value && typeof cell.value === 'object' && cell.value.richText) {
+        // Giorno con permesso parziale
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEF3C7' } }; // ambra chiaro
       }
       cell.border = {
         top: { style: 'hair' }, left: { style: 'hair' }, bottom: { style: 'hair' }, right: { style: 'hair' }
