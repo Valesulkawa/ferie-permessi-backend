@@ -78,19 +78,19 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// ====== Email
+// ====== Email (Gmail SMTP esplicito, no pool, IPv4) ======
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true,                 // SSL obbligatorio su 465
   auth: {
     user: 'latelierpermessi@gmail.com',
-    pass: 'axidghirhhflyfyr' // password per app (Gmail)
+    pass: 'axidghirhhflyfyr'   // App Password Gmail
   },
-  pool: true,
-  maxConnections: 2,
-  maxMessages: 20,
-  socketTimeout: 15000,      // 15s
-  greetingTimeout: 7000,     // 7s
-  connectionTimeout: 10000   // 10s
+  connectionTimeout: 10000,     // 10s
+  greetingTimeout: 7000,        // 7s
+  socketTimeout: 15000,         // 15s
+  family: 4                     // forza IPv4 (evita problemi IPv6 su alcuni host)
 });
 
 // Diagnostica all’avvio
@@ -98,12 +98,17 @@ transporter.verify()
   .then(() => console.log('📨 SMTP pronto (Gmail)'))
   .catch(err => console.error('❌ SMTP non disponibile:', err?.message || err));
 
+// Invio sicuro con mittente di default e log dettagliato
 async function safeSendMail(options) {
   try {
-    await transporter.sendMail(options);
+    const info = await transporter.sendMail({
+      from: 'Ferie/Permessi &lt;latelierpermessi@gmail.com&gt;', // mittente leggibile
+      ...options
+    });
+    console.log('MAIL OK:', info?.messageId, info?.response || '');
     return { ok: true };
   } catch (err) {
-    console.error('MAIL ERROR:', err?.response || err?.message || err);
+    console.error('MAIL ERROR:', err?.code, err?.response || err?.message || err);
     return { ok: false, error: String(err?.message || err) };
   }
 }
