@@ -78,32 +78,56 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// ====== Email (Gmail SMTP esplicito, no pool, IPv4) ======
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true,                 // SSL obbligatorio su 465
-  auth: {
-    user: 'latelierpermessi@gmail.com',
-    pass: 'axidghirhhflyfyr'   // App Password Gmail
-  },
-  connectionTimeout: 10000,     // 10s
-  greetingTimeout: 7000,        // 7s
-  socketTimeout: 15000,         // 15s
-  family: 4                     // forza IPv4 (evita problemi IPv6 su alcuni host)
-});
+// ====== Email (Gmail SMTP con fallback 465→587→service:gmail) ======
+let transporter; // sarà impostato da setupTransporter()
 
-// Diagnostica all’avvio
-transporter.verify()
-  .then(() => console.log('📨 SMTP pronto (Gmail)'))
-  .catch(err => console.error('❌ SMTP non disponibile:', err?.message || err));
+async function setupTransporter() {
+  const base = {
+    auth: {
+      user: 'latelierpermessi@gmail.com',
+      pass: 'axidghirhhflyfyr', // App Password Gmail
+    },
+    connectionTimeout: 10000,   // 10s
+    greetingTimeout: 7000,      // 7s
+    socketTimeout: 15000,       // 15s
+    family: 4,                  // forza IPv4 (evita problemi IPv6)
+    tls: { minVersion: 'TLSv1.2' },
+  };
 
-// Invio sicuro con mittente di default e log dettagliato
+  const attempts = [
+    { host: 'smtp.gmail.com', port: 465, secure: true },                 // SSL 465
+    { host: 'smtp.gmail.com', port: 587, secure: false, requireTLS: true }, // STARTTLS 587
+    { service: 'gmail' },                                               // fallback service
+  ];
+
+  for (const cfg of attempts) {
+    try {
+      const t = nodemailer.createTransport({ ...base, ...cfg });
+      await t.verify(); // test di connessione/credenziali
+      transporter = t;
+      const label = cfg.service ? `service:${cfg.service}` : `${cfg.host}:${cfg.port}`;
+      console.log('📨 SMTP pronto con config →', label);
+      return;
+    } catch (err) {
+      const label = cfg.service ? `service:${cfg.service}` : `${cfg.host}:${cfg.port}`;
+      console.error('SMTP attempt fallito su', label, '-', err?.message || err);
+    }
+  }
+  console.error('❌ Nessun trasporto SMTP disponibile. Le email non verranno inviate.');
+}
+
+// inizializza all'avvio (non blocca il server se fallisce il primo tentativo)
+setupTransporter().catch(() => {});
+
+// Invio sicuro con mittente di default e retry soft se transporter non pronto
 async function safeSendMail(options) {
   try {
+    if (!transporter) await setupTransporter();
+    if (!transporter) throw new Error('SMTP non disponibile');
+
     const info = await transporter.sendMail({
-      from: 'Ferie/Permessi &lt;latelierpermessi@gmail.com&gt;', // mittente leggibile
-      ...options
+      from: '"Ferie/Permessi" <latelierpermessi@gmail.com>', // mittente leggibile e coerente
+      ...options,
     });
     console.log('MAIL OK:', info?.messageId, info?.response || '');
     return { ok: true };
