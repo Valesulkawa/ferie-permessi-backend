@@ -66,9 +66,30 @@ const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: 'latelierpermessi@gmail.com',
-    pass: 'axidghirhhflyfyr'
-  }
+    pass: 'axidghirhhflyfyr' // password per app (Gmail)
+  },
+  pool: true,
+  maxConnections: 2,
+  maxMessages: 20,
+  socketTimeout: 15000,      // 15s
+  greetingTimeout: 7000,     // 7s
+  connectionTimeout: 10000   // 10s
 });
+
+// Diagnostica all’avvio
+transporter.verify()
+  .then(() => console.log('📨 SMTP pronto (Gmail)'))
+  .catch(err => console.error('❌ SMTP non disponibile:', err?.message || err));
+
+async function safeSendMail(options) {
+  try {
+    await transporter.sendMail(options);
+    return { ok: true };
+  } catch (err) {
+    console.error('MAIL ERROR:', err?.response || err?.message || err);
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
 
 // ====== Auth admin
 const JWT_SECRET = 'chiave_super_segreta';
@@ -228,6 +249,17 @@ app.delete('/api/admin/date-bloccate/:data', requireAdmin, async (req, res) => {
   const { data } = req.params;
   await pool.query(`DELETE FROM date_bloccate WHERE data = $1`, [data]);
   res.json({ message: 'Data bloccata rimossa correttamente.' });
+});
+
+app.post('/api/admin/test-mail', requireAdmin, async (req, res) => {
+  const mail = await safeSendMail({
+    from: 'latelierpermessi@gmail.com',
+    to: 'latelierpermessi@gmail.com',
+    subject: 'Test SMTP Ferie/Permessi',
+    text: 'Questo è un invio di test dal backend su Render.'
+  });
+  if (mail.ok) return res.json({ ok: true });
+  return res.status(500).json({ ok: false, error: mail.error });
 });
 
 // ====== Admin: report mensile in Excel ======
@@ -545,12 +577,11 @@ app.post('/api/richieste', async (req, res) => {
     ]
   );
 
-  try {
-    await transporter.sendMail({
-      from: 'latelierpermessi@gmail.com',
-      to: 'latelierpermessi@gmail.com',
-      subject: `Nuova richiesta di ${tipo} da ${nome}`,
-      text: `
+  const mail = await safeSendMail({
+    from: 'latelierpermessi@gmail.com',
+    to: 'latelierpermessi@gmail.com',
+    subject: `Nuova richiesta di ${tipo} da ${nome}`,
+    text: `
 📩 Nuova richiesta ricevuta:
 
 👤 Nome: ${nome}
@@ -561,13 +592,14 @@ app.post('/api/richieste', async (req, res) => {
 📝 Motivazione: ${motivazione || 'N/A'}
 🗒️ Note: ${note || 'Nessuna'}
 📌 Stato: ${statoBase}
-      `
-    });
-    res.json({ message: 'Richiesta inviata con successo!', stato: statoBase });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Errore nell\'invio dell\'email.' });
-  }
+    `
+  });
+
+  return res.json({
+    message: mail.ok ? 'Richiesta inviata con successo!' : 'Richiesta salvata. (Email non inviata)',
+    stato: statoBase,
+    emailInviata: !!mail.ok
+  });
 });
 
 // ====== Dipendenti: lista
