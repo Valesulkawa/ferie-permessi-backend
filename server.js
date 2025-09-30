@@ -18,12 +18,29 @@ if (!process.env.DATABASE_URL) {
 }
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // richiesto su Render
+  ssl: { rejectUnauthorized: false }, // richiesto su Render/Neon
+  max: 5,
+  idleTimeoutMillis: 30_000,        // chiude connessioni inattive dopo 30s
+  connectionTimeoutMillis: 15_000,  // timeout di connessione a DB (fail fast)
 });
+
+// Imposta un timeout di esecuzione query lato DB per ogni nuova connessione
+pool.on('connect', (client) => {
+  client.query("SET statement_timeout = '15000ms'").catch(() => {});
+});
+
+// Esegue una query con timeout lato Node (oltre allo statement_timeout lato DB)
+async function dbQuery(sql, params = [], timeoutMs = 15_000) {
+  const q = pool.query(sql, params);
+  const t = new Promise((_, rej) =>
+    setTimeout(() => rej(new Error('DB query timeout')), timeoutMs)
+  );
+  return Promise.race([q, t]);
+}
 
 // Creazione tabelle se non esistono
 async function initDb() {
-  await pool.query(`
+  await dbQuery(`
     CREATE TABLE IF NOT EXISTS richieste (
       id SERIAL PRIMARY KEY,
       tipo TEXT,
@@ -40,7 +57,7 @@ async function initDb() {
     );
   `);
 
-  await pool.query(`
+  await dbQuery(`
     CREATE TABLE IF NOT EXISTS date_bloccate (
       id SERIAL PRIMARY KEY,
       data TEXT UNIQUE
@@ -214,7 +231,7 @@ app.get('/api/admin/richieste', requireAdmin, async (req, res) => {
 
   sql += ` ORDER BY dataRichiesta DESC`;
 
-  const { rows } = await pool.query(sql, params);
+  const { rows } = await dbQuery(sql, params);
   res.json(rows);
 });
 
@@ -224,13 +241,13 @@ app.delete('/api/admin/richieste', requireAdmin, async (req, res) => {
   if (!ids || !Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ message: 'Nessuna richiesta selezionata.' });
   }
-  await pool.query(`DELETE FROM richieste WHERE id = ANY($1::int[])`, [ids]);
+  await dbQuery(`DELETE FROM richieste WHERE id = ANY($1::int[])`, [ids]);
   res.json({ message: 'Richieste eliminate correttamente.' });
 });
 
 // ====== Admin: date bloccate
 app.get('/api/admin/date-bloccate', requireAdmin, async (_req, res) => {
-  const { rows } = await pool.query(`SELECT data FROM date_bloccate ORDER BY data ASC`);
+  const { rows } = await dbQuery(`SELECT data FROM date_bloccate ORDER BY data ASC`);
   res.json(rows.map(r => r.data));
 });
 
@@ -238,7 +255,7 @@ app.post('/api/admin/date-bloccate', requireAdmin, async (req, res) => {
   const { data } = req.body;
   if (!data) return res.status(400).json({ message: 'Data mancante.' });
   try {
-    await pool.query(`INSERT INTO date_bloccate (data) VALUES ($1)`, [data]);
+    await dbQuery(`INSERT INTO date_bloccate (data) VALUES ($1)`, [data]);
     res.json({ message: 'Data bloccata aggiunta correttamente.' });
   } catch (err) {
     res.status(400).json({ message: 'La data è già bloccata.' });
@@ -247,7 +264,7 @@ app.post('/api/admin/date-bloccate', requireAdmin, async (req, res) => {
 
 app.delete('/api/admin/date-bloccate/:data', requireAdmin, async (req, res) => {
   const { data } = req.params;
-  await pool.query(`DELETE FROM date_bloccate WHERE data = $1`, [data]);
+  await dbQuery(`DELETE FROM date_bloccate WHERE data = $1`, [data]);
   res.json({ message: 'Data bloccata rimossa correttamente.' });
 });
 
@@ -278,7 +295,7 @@ app.get('/api/admin/report', requireAdmin, async (req, res) => {
 
   // Prendiamo solo richieste che "tocchino" il mese (match sulla stringa dei giorni)
   const like = `%${month}-%`;
-  const { rows } = await pool.query(
+  const { rows } = await dbQuery(
     `SELECT * FROM richieste WHERE giorni LIKE $1`,
     [like]
   );
@@ -526,7 +543,13 @@ app.post('/api/richieste', async (req, res) => {
 
   // blocco date (solo Ferie/Permesso)
   if (tipo && tipo.trim().toLowerCase() !== 'mutua') {
-    const { rows } = await pool.query(`SELECT data FROM date_bloccate`);
+    let rows = [];
+    try {
+      ({ rows } = await dbQuery(`SELECT data FROM date_bloccate`));
+    } catch (e) {
+      console.error('DB error date_bloccate:', e);
+      return res.status(503).json({ message: 'Servizio non disponibile (DB)', error: String(e.message || e) });
+    }
     const set = new Set(rows.map(r => r.data));
     const richiesteISO = giorni.map(g => new Date(g).toISOString().split('T')[0]);
     const nonConsentite = [...new Set(richiesteISO.filter(d => set.has(d)))];
@@ -549,7 +572,7 @@ app.post('/api/richieste', async (req, res) => {
 
   // 🔒 Anti-duplicato: evita doppio invio identico entro 30 secondi
   try {
-    const dupCheck = await pool.query(
+    const dupCheck = await dbQuery(
       `SELECT id FROM richieste
        WHERE nome = $1 AND tipo = $2 AND giorni = $3
          AND dataRichiesta > NOW() - INTERVAL '30 seconds'
@@ -566,16 +589,21 @@ app.post('/api/richieste', async (req, res) => {
     console.error('Errore controllo duplicati:', e);
   }
 
-  await pool.query(
-    `INSERT INTO richieste (tipo, nome, email, giorni, ore, oraInizio, oraFine, motivazione, note, stato)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-    [
-      tipo, nome, email,
-      JSON.stringify(giorni),
-      ore || '', oraInizio || '', oraFine || '',
-      motivazione || '', note || '', statoBase
-    ]
-  );
+  try {
+    await dbQuery(
+      `INSERT INTO richieste (tipo, nome, email, giorni, ore, oraInizio, oraFine, motivazione, note, stato)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        tipo, nome, email,
+        JSON.stringify(giorni),
+        ore || '', oraInizio || '', oraFine || '',
+        motivazione || '', note || '', statoBase
+      ]
+    );
+  } catch (e) {
+    console.error('DB error INSERT richiesta:', e);
+    return res.status(503).json({ message: 'Salvataggio non riuscito (DB)', error: String(e.message || e) });
+  }
 
   const mail = await safeSendMail({
     from: 'latelierpermessi@gmail.com',
@@ -603,9 +631,29 @@ app.post('/api/richieste', async (req, res) => {
 });
 
 // ====== Dipendenti: lista
+// Health-check: verifica server e connettività DB
+app.get('/api/health', async (_req, res) => {
+  const start = Date.now();
+  try {
+    await dbQuery('SELECT 1');
+    return res.json({ ok: true, db: true, elapsedMs: Date.now() - start, ts: Date.now() });
+  } catch (e) {
+    return res.status(503).json({
+      ok: false, db: false,
+      error: String(e.message || e),
+      elapsedMs: Date.now() - start, ts: Date.now()
+    });
+  }
+});
+
 app.get('/api/richieste', async (_req, res) => {
-  const { rows } = await pool.query(`SELECT * FROM richieste ORDER BY dataRichiesta DESC`);
-  res.json(rows);
+  try {
+    const { rows } = await dbQuery(`SELECT * FROM richieste ORDER BY dataRichiesta DESC`);
+    res.json(rows);
+  } catch (e) {
+    console.error('DB error /api/richieste:', e);
+    res.status(503).json({ message: 'Database non raggiungibile', error: String(e.message || e) });
+  }
 });
 
 app.listen(PORT, () => console.log(`✅ Backend avviato su http://localhost:${PORT}`));
