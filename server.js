@@ -78,36 +78,34 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// ====== Email (Gmail SMTP con fallback 465→587→service:gmail) ======
-let transporter; // sarà impostato da setupTransporter()
+// ====== Email: Resend (se RESEND_API_KEY) con fallback SMTP esplicito (no pool) ======
+const MAIL_FROM = process.env.MAIL_FROM || 'Ferie/Permessi <latelierpermessi@gmail.com>';
+const MAIL_TO   = process.env.MAIL_TO   || 'latelierpermessi@gmail.com';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+
+let transporter; // creato lazy solo se serve SMTP
 
 async function setupTransporter() {
+  // Config base per Gmail. Niente "pool" per evitare connessioni persistenti su free tier
   const base = {
-    auth: {
-      user: 'latelierpermessi@gmail.com',
-      pass: 'axidghirhhflyfyr', // App Password Gmail
-    },
-    connectionTimeout: 10000,   // 10s
-    greetingTimeout: 7000,      // 7s
-    socketTimeout: 15000,       // 15s
-    family: 4,                  // forza IPv4 (evita problemi IPv6)
+    auth: { user: 'latelierpermessi@gmail.com', pass: 'axidghirhhflyfyr' },
+    connectionTimeout: 10000,
+    greetingTimeout: 7000,
+    socketTimeout: 15000,
+    family: 4,                 // forza IPv4
     tls: { minVersion: 'TLSv1.2' },
-    // pooled transport settings
-    pool: true,
-    maxConnections: 1,
-    maxMessages: 50,
   };
 
   const attempts = [
-    { host: 'smtp.gmail.com', port: 465, secure: true },                 // SSL 465
+    { host: 'smtp.gmail.com', port: 465, secure: true },               // SSL 465
     { host: 'smtp.gmail.com', port: 587, secure: false, requireTLS: true }, // STARTTLS 587
-    { service: 'gmail' },                                               // fallback service
+    { service: 'gmail' },
   ];
 
   for (const cfg of attempts) {
     try {
       const t = nodemailer.createTransport({ ...base, ...cfg });
-      await t.verify(); // test di connessione/credenziali
+      await t.verify();
       transporter = t;
       const label = cfg.service ? `service:${cfg.service}` : `${cfg.host}:${cfg.port}`;
       console.log('📨 SMTP pronto con config →', label);
@@ -117,43 +115,77 @@ async function setupTransporter() {
       console.error('SMTP attempt fallito su', label, '-', err?.message || err);
     }
   }
-  console.error('❌ Nessun trasporto SMTP disponibile. Le email non verranno inviate.');
+  console.error('❌ Nessun trasporto SMTP disponibile.');
 }
 
-// inizializza all'avvio (non blocca il server se fallisce il primo tentativo)
-setupTransporter().catch(() => {});
+async function sendViaSMTP(mail) {
+  if (!transporter) await setupTransporter();
+  if (!transporter) throw new Error('SMTP non disponibile');
+  const info = await transporter.sendMail({ from: MAIL_FROM, ...mail });
+  console.log('MAIL SMTP OK:', info?.messageId || '', info?.response || '');
+}
 
-// Invio sicuro con mittente di default e retry soft se transporter non pronto
-async function safeSendMail(options) {
-  try {
-    if (!transporter) await setupTransporter();
-    if (!transporter) throw new Error('SMTP non disponibile');
-
-    const info = await transporter.sendMail({
-      from: '"Ferie/Permessi" <latelierpermessi@gmail.com>', // mittente leggibile e coerente
-      ...options,
-    });
-    console.log('MAIL OK:', info?.messageId, info?.response || '');
-    return { ok: true };
-  } catch (err) {
-    console.error('MAIL ERROR:', err?.code, err?.response || err?.message || err);
-    return { ok: false, error: String(err?.message || err) };
+async function sendViaResend(mail) {
+  // usa fetch built‑in (Node >=18)
+  const resp = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      from: MAIL_FROM,
+      to: Array.isArray(mail.to) ? mail.to : [mail.to || MAIL_TO],
+      subject: mail.subject,
+      text: mail.text,
+    })
+  });
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    throw new Error(`Resend ${resp.status}: ${txt}`);
   }
+  const j = await resp.json().catch(() => ({}));
+  console.log('MAIL RESEND OK:', j?.id || '');
 }
 
-// Schedula l'invio email in background per non bloccare la risposta HTTP
-function scheduleMail(options) {
+// Invio con preferenza Resend, fallback a SMTP. Non blocca la risposta HTTP.
+async function safeSendMail(mail) {
   try {
-    // non attende la promise; logga eventuali errori senza interrompere il flusso
-    setTimeout(() => {
-      safeSendMail(options).then((r) => {
-        if (!r?.ok) console.error('Async mail failed:', r?.error);
-      }).catch(err => console.error('Async mail crash:', err));
-    }, 0);
+    if (RESEND_API_KEY) {
+      await sendViaResend({ to: MAIL_TO, ...mail });
+      return { ok: true, provider: 'resend' };
+    }
   } catch (e) {
-    console.error('scheduleMail error:', e);
+    console.error('Resend fallito:', e?.message || e);
+  }
+  try {
+    await sendViaSMTP({ to: MAIL_TO, ...mail });
+    return { ok: true, provider: 'smtp' };
+  } catch (e) {
+    console.error('SMTP fallito:', e?.message || e);
+    return { ok: false, error: String(e?.message || e) };
   }
 }
+
+// Schedula invio async (fire-and-forget) per non bloccare gli endpoint
+function scheduleMail(mail) {
+  setTimeout(() => {
+    safeSendMail(mail).then((r) => {
+      if (!r?.ok) console.error('Async mail failed:', r?.error);
+    }).catch(err => console.error('Async mail crash:', err));
+  }, 0);
+}
+
+// Endpoint diagnostico: mostra provider e stato
+app.get('/api/admin/email-status', async (_req, res) => {
+  res.json({
+    provider: RESEND_API_KEY ? 'resend' : 'smtp',
+    haveResendKey: Boolean(RESEND_API_KEY),
+    mailFrom: MAIL_FROM,
+    mailTo: MAIL_TO,
+    transporterReady: Boolean(transporter)
+  });
+});
 
 // ====== Auth admin
 const JWT_SECRET = 'chiave_super_segreta';
@@ -317,8 +349,8 @@ app.delete('/api/admin/date-bloccate/:data', requireAdmin, async (req, res) => {
 
 app.post('/api/admin/test-mail', requireAdmin, async (req, res) => {
   const mail = await safeSendMail({
-    from: 'latelierpermessi@gmail.com',
-    to: 'latelierpermessi@gmail.com',
+    from: MAIL_FROM,
+    to: MAIL_TO,
     subject: 'Test SMTP Ferie/Permessi',
     text: 'Questo è un invio di test dal backend su Render.'
   });
@@ -654,8 +686,8 @@ app.post('/api/richieste', async (req, res) => {
 
   // invio email in background (non blocca la risposta all'utente)
   scheduleMail({
-    from: 'latelierpermessi@gmail.com',
-    to: 'latelierpermessi@gmail.com',
+    from: MAIL_FROM,
+    to: MAIL_TO,
     subject: `Nuova richiesta di ${tipo} da ${nome}`,
     text: `
 📩 Nuova richiesta ricevuta:
