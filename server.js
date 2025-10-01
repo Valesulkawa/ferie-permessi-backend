@@ -92,6 +92,10 @@ async function setupTransporter() {
     socketTimeout: 15000,       // 15s
     family: 4,                  // forza IPv4 (evita problemi IPv6)
     tls: { minVersion: 'TLSv1.2' },
+    // pooled transport settings
+    pool: true,
+    maxConnections: 1,
+    maxMessages: 50,
   };
 
   const attempts = [
@@ -134,6 +138,20 @@ async function safeSendMail(options) {
   } catch (err) {
     console.error('MAIL ERROR:', err?.code, err?.response || err?.message || err);
     return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+// Schedula l'invio email in background per non bloccare la risposta HTTP
+function scheduleMail(options) {
+  try {
+    // non attende la promise; logga eventuali errori senza interrompere il flusso
+    setTimeout(() => {
+      safeSendMail(options).then((r) => {
+        if (!r?.ok) console.error('Async mail failed:', r?.error);
+      }).catch(err => console.error('Async mail crash:', err));
+    }, 0);
+  } catch (e) {
+    console.error('scheduleMail error:', e);
   }
 }
 
@@ -634,7 +652,8 @@ app.post('/api/richieste', async (req, res) => {
     return res.status(503).json({ message: 'Salvataggio non riuscito (DB)', error: String(e.message || e) });
   }
 
-  const mail = await safeSendMail({
+  // invio email in background (non blocca la risposta all'utente)
+  scheduleMail({
     from: 'latelierpermessi@gmail.com',
     to: 'latelierpermessi@gmail.com',
     subject: `Nuova richiesta di ${tipo} da ${nome}`,
@@ -652,10 +671,11 @@ app.post('/api/richieste', async (req, res) => {
     `
   });
 
+  // risponde subito: la mail verrà inviata in asincrono
   return res.json({
-    message: mail.ok ? 'Richiesta inviata con successo!' : 'Richiesta salvata. (Email non inviata)',
+    message: 'Richiesta inviata con successo! (email in consegna)',
     stato: statoBase,
-    emailInviata: !!mail.ok
+    emailScheduled: true
   });
 });
 
