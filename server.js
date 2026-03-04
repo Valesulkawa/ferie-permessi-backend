@@ -11,14 +11,15 @@ const { Pool } = pg;
 
 const app = express();
 const PORT = process.env.PORT || 5001;
+const APP_NAME = process.env.APP_NAME || 'Leave Requests Demo';
 
 // ====== DB: Postgres via DATABASE_URL ======
 if (!process.env.DATABASE_URL) {
-  console.error('❌ DATABASE_URL non configurata su Render.');
+  console.error('❌ DATABASE_URL non configurata.');
 }
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // richiesto su Render/Neon
+  ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
   max: 5,
   idleTimeoutMillis: 30_000,        // chiude connessioni inattive dopo 30s
   connectionTimeoutMillis: 15_000,  // timeout di connessione a DB (fail fast)
@@ -78,29 +79,39 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// ====== Email: Resend (se RESEND_API_KEY) con fallback SMTP esplicito (no pool) ======
-const MAIL_FROM = process.env.MAIL_FROM || 'Ferie/Permessi <latelierpermessi@gmail.com>';
-const MAIL_TO   = process.env.MAIL_TO   || 'latelierpermessi@gmail.com';
-const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+// ====== Email: provider API opzionale con fallback SMTP esplicito (no pool) ======
+const MAIL_FROM = process.env.MAIL_FROM || `${APP_NAME} <noreply@example.com>`;
+const MAIL_TO   = process.env.MAIL_TO   || 'approvals@example.com';
+const MAIL_API_KEY = process.env.MAIL_API_KEY || '';
+const MAIL_API_URL = process.env.MAIL_API_URL || '';
+const SMTP_HOST = process.env.SMTP_HOST || '';
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true';
+const SMTP_USER = process.env.SMTP_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || '';
 
 let transporter; // creato lazy solo se serve SMTP
 
 async function setupTransporter() {
-  // Config base per Gmail. Niente "pool" per evitare connessioni persistenti su free tier
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+    console.warn('SMTP non configurato: imposta SMTP_HOST, SMTP_USER e SMTP_PASS.');
+    return;
+  }
+
   const base = {
-    auth: { user: 'latelierpermessi@gmail.com', pass: 'axidghirhhflyfyr' },
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
     connectionTimeout: 10000,
     greetingTimeout: 7000,
     socketTimeout: 15000,
-    family: 4,                 // forza IPv4
     tls: { minVersion: 'TLSv1.2' },
   };
 
-  const attempts = [
-    { host: 'smtp.gmail.com', port: 465, secure: true },               // SSL 465
-    { host: 'smtp.gmail.com', port: 587, secure: false, requireTLS: true }, // STARTTLS 587
-    { service: 'gmail' },
-  ];
+  const attempts = [{
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    requireTLS: !SMTP_SECURE
+  }];
 
   for (const cfg of attempts) {
     try {
@@ -125,12 +136,15 @@ async function sendViaSMTP(mail) {
   console.log('MAIL SMTP OK:', info?.messageId || '', info?.response || '');
 }
 
-async function sendViaResend(mail) {
-  // usa fetch built‑in (Node >=18)
-  const resp = await fetch('https://api.resend.com/emails', {
+async function sendViaMailApi(mail) {
+  if (!MAIL_API_URL) {
+    throw new Error('MAIL_API_URL non configurata');
+  }
+
+  const resp = await fetch(MAIL_API_URL, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${RESEND_API_KEY}`,
+      'Authorization': `Bearer ${MAIL_API_KEY}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
@@ -142,21 +156,21 @@ async function sendViaResend(mail) {
   });
   if (!resp.ok) {
     const txt = await resp.text().catch(() => '');
-    throw new Error(`Resend ${resp.status}: ${txt}`);
+    throw new Error(`Mail API ${resp.status}: ${txt}`);
   }
   const j = await resp.json().catch(() => ({}));
-  console.log('MAIL RESEND OK:', j?.id || '');
+  console.log('MAIL API OK:', j?.id || '');
 }
 
-// Invio con preferenza Resend, fallback a SMTP. Non blocca la risposta HTTP.
+// Invio con preferenza API esterna, fallback a SMTP. Non blocca la risposta HTTP.
 async function safeSendMail(mail) {
   try {
-    if (RESEND_API_KEY) {
-      await sendViaResend({ to: MAIL_TO, ...mail });
-      return { ok: true, provider: 'resend' };
+    if (MAIL_API_KEY) {
+      await sendViaMailApi({ to: MAIL_TO, ...mail });
+      return { ok: true, provider: 'mail-api' };
     }
   } catch (e) {
-    console.error('Resend fallito:', e?.message || e);
+    console.error('Mail API fallita:', e?.message || e);
   }
   try {
     await sendViaSMTP({ to: MAIL_TO, ...mail });
@@ -179,8 +193,8 @@ function scheduleMail(mail) {
 // Endpoint diagnostico: mostra provider e stato
 app.get('/api/admin/email-status', async (_req, res) => {
   res.json({
-    provider: RESEND_API_KEY ? 'resend' : 'smtp',
-    haveResendKey: Boolean(RESEND_API_KEY),
+    provider: MAIL_API_KEY ? 'mail-api' : 'smtp',
+    haveMailApiKey: Boolean(MAIL_API_KEY),
     mailFrom: MAIL_FROM,
     mailTo: MAIL_TO,
     transporterReady: Boolean(transporter)
@@ -188,9 +202,9 @@ app.get('/api/admin/email-status', async (_req, res) => {
 });
 
 // ====== Auth admin
-const JWT_SECRET = 'chiave_super_segreta';
-const ADMIN_EMAIL = 'daniele.rizzioli@gmail.com';
-const ADMIN_PASSWORD = '01o@JgpC!#@x^smu$*';
+const JWT_SECRET = process.env.JWT_SECRET || 'demo-jwt-secret-change-me';
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@example.com';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'demo-admin-password';
 
 app.post('/api/admin/login', (req, res) => {
   const { email, password } = req.body || {};
@@ -351,8 +365,8 @@ app.post('/api/admin/test-mail', requireAdmin, async (req, res) => {
   const mail = await safeSendMail({
     from: MAIL_FROM,
     to: MAIL_TO,
-    subject: 'Test SMTP Ferie/Permessi',
-    text: 'Questo è un invio di test dal backend su Render.'
+    subject: `Test SMTP ${APP_NAME}`,
+    text: 'Questo e un invio di test dal backend demo.'
   });
   if (mail.ok) return res.json({ ok: true });
   return res.status(500).json({ ok: false, error: mail.error });
@@ -445,7 +459,7 @@ app.get('/api/admin/report', requireAdmin, async (req, res) => {
 
   // === Workbook: un solo foglio "Riepilogo" con mese testuale e stile ===
   const wb = new ExcelJS.Workbook();
-  wb.creator = 'Ferie/Permessi App';
+  wb.creator = APP_NAME;
   wb.created = new Date();
 
   const mesiIT = ['gennaio','febbraio','marzo','aprile','maggio','giugno','luglio','agosto','settembre','ottobre','novembre','dicembre'];
@@ -700,7 +714,7 @@ app.post('/api/richieste', async (req, res) => {
 📝 Motivazione: ${motivazione || 'N/A'}
 🗒️ Note: ${note || 'Nessuna'}
 📌 Stato: ${statoBase}
-    `
+    `.trim()
   });
 
   // risponde subito: la mail verrà inviata in asincrono
@@ -737,4 +751,4 @@ app.get('/api/richieste', async (_req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`✅ Backend avviato su http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`✅ Backend avviato sulla porta ${PORT}`));

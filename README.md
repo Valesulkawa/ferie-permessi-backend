@@ -1,183 +1,137 @@
 # ferie-permessi-backend
 
-Backend Node.js/Express per la gestione di richieste ferie, permessi e mutua, con persistenza su PostgreSQL, invio email di notifica e generazione report Excel.
+Repository sanitizzato per portfolio: backend Node.js/Express per richieste di assenza, con persistenza PostgreSQL, invio notifiche e report Excel.
 
 ## Panoramica
 
-Il repository contiene tre blocchi distinti:
+Il runtime principale e' [server.js](/Users/valesulkawa/Documents/New%20project/ferie-permessi-backend-codex/server.js). Il repository contiene anche:
 
-- `server.js`: backend Express principale usato per le API applicative.
-- `functions/`: progetto Firebase Functions separato, al momento ancora scaffold di default.
-- `build/`: build statica frontend configurata per Firebase Hosting.
+- [build/index.html](/Users/valesulkawa/Documents/New%20project/ferie-permessi-backend-codex/build/index.html): placeholder statico neutro.
+- [functions/index.js](/Users/valesulkawa/Documents/New%20project/ferie-permessi-backend-codex/functions/index.js): scaffold minimo per la cartella `functions`.
+- [demo/requests.demo.json](/Users/valesulkawa/Documents/New%20project/ferie-permessi-backend-codex/demo/requests.demo.json): richieste fittizie.
+- [demo/date-bloccate.demo.json](/Users/valesulkawa/Documents/New%20project/ferie-permessi-backend-codex/demo/date-bloccate.demo.json): date bloccate fittizie.
 
-Il runtime effettivo dell'applicazione e' il server Express in root. Le SQLite versionate (`db.sqlite`, `database.sqlite`) non vengono usate dal codice attuale: il backend lavora con PostgreSQL tramite `DATABASE_URL`.
-
-## Stack
-
-- Node.js
-- Express
-- PostgreSQL (`pg`)
-- Nodemailer
-- ExcelJS
-- Firebase Hosting / Cloud Functions (cartella separata, non integrata con `server.js`)
+Gli artefatti SQLite legacy con dati reali sono stati rimossi.
 
 ## Struttura
 
 ```text
 .
-|-- build/                 # frontend statico per Firebase Hosting
-|-- functions/             # progetto Firebase Functions separato
-|   |-- index.js           # scaffold Firebase
-|   `-- package.json
-|-- server.js              # entrypoint del backend Express
-|-- firebase.json          # config Hosting + Functions
-|-- package.json           # dipendenze e script backend
-|-- db.sqlite              # artefatto legacy, non usato dal server corrente
-`-- database.sqlite        # artefatto legacy, non usato dal server corrente
+|-- build/
+|-- demo/
+|-- functions/
+|-- .env.example
+|-- firebase.json
+|-- package.json
+`-- server.js
 ```
 
 ## Requisiti
 
 - Node.js 22 consigliato
 - npm
-- Un database PostgreSQL raggiungibile dall'ambiente locale
+- PostgreSQL accessibile dall'ambiente di esecuzione
 
 ## Variabili ambiente
 
-Il backend legge queste variabili:
+Le variabili disponibili sono documentate in [.env.example](/Users/valesulkawa/Documents/New%20project/ferie-permessi-backend-codex/.env.example).
 
-- `PORT`: porta HTTP locale. Default `5001`.
-- `DATABASE_URL`: stringa di connessione PostgreSQL. Obbligatoria.
-- `MAIL_FROM`: mittente email mostrato nelle notifiche.
-- `MAIL_TO`: destinatario delle notifiche.
-- `RESEND_API_KEY`: se valorizzata usa Resend; altrimenti tenta il fallback SMTP definito nel codice.
+Obbligatorie:
 
-Esempio: vedi [`.env.example`](/Users/valesulkawa/Documents/New project/ferie-permessi-backend-codex/.env.example).
+- `DATABASE_URL`
+
+Raccomandate:
+
+- `APP_NAME`
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD`
+- `JWT_SECRET`
+- `MAIL_FROM`
+- `MAIL_TO`
+
+Opzionali:
+
+- `DB_SSL`
+- `MAIL_API_URL`
+- `MAIL_API_KEY`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_SECURE`
+- `SMTP_USER`
+- `SMTP_PASS`
 
 ## Avvio locale
 
-1. Installa le dipendenze root:
-
 ```bash
 npm install
-```
-
-2. Crea il file ambiente:
-
-```bash
 cp .env.example .env
-```
-
-3. Compila almeno `DATABASE_URL` con un Postgres valido.
-
-4. Avvia il backend:
-
-```bash
 npm start
 ```
 
-Per default il server espone `http://localhost:5001`.
+Il bootstrap fa questo:
 
-### Verifica rapida
+1. Crea la pool PostgreSQL da `DATABASE_URL`.
+2. Inizializza le tabelle `richieste` e `date_bloccate`.
+3. Configura middleware HTTP e autenticazione admin.
+4. Tenta l'invio notifiche tramite `MAIL_API_*` o fallback SMTP.
+5. Espone le API sulla porta configurata.
 
-Con il server avviato:
-
-```bash
-curl http://localhost:5001/api/health
-```
-
-Risultato atteso:
-
-- `200` con `{ "ok": true, "db": true, ... }` se API e database sono disponibili
-- `503` se il database non e' raggiungibile
-
-## Come si avvia davvero il progetto
-
-Dal codice attuale il flusso di bootstrap e' questo:
-
-1. `server.js` crea una `Pool` PostgreSQL usando `DATABASE_URL`.
-2. All'avvio esegue `initDb()` e crea, se mancanti, le tabelle:
-   - `richieste`
-   - `date_bloccate`
-3. Configura middleware Express (`cors`, `body-parser`).
-4. Inizializza il sistema email:
-   - Resend se `RESEND_API_KEY` e' presente
-   - fallback SMTP altrimenti
-5. Espone le API e apre l'ascolto su `PORT` oppure `5001`.
-
-Se `DATABASE_URL` manca, il server logga l'errore; senza un database valido gli endpoint che leggono o scrivono dati falliranno.
+In questa sessione l'avvio completo non era verificabile fino al bind della porta per limiti del sandbox, ma l'entrypoint e i prerequisiti sono stati controllati dal codice e dall'installazione dipendenze.
 
 ## API principali
 
-### Pubbliche
+- `POST /api/richieste`: crea una richiesta ferie, permesso o mutua.
+- `GET /api/richieste`: lista richieste.
+- `GET /api/health`: verifica applicazione e database.
+- `POST /api/admin/login`: genera token admin.
+- `GET /api/admin/email-status`: stato del provider mail.
+- `GET /api/admin/richieste`: lista admin con filtri.
+- `DELETE /api/admin/richieste`: elimina richieste selezionate.
+- `GET /api/admin/date-bloccate`: elenca date bloccate.
+- `POST /api/admin/date-bloccate`: aggiunge data bloccata.
+- `DELETE /api/admin/date-bloccate/:data`: rimuove data bloccata.
+- `POST /api/admin/test-mail`: invio test.
+- `GET /api/admin/report?month=YYYY-MM`: esporta report Excel.
 
-- `POST /api/richieste`
-  Inserisce una richiesta ferie, permesso o mutua. Effettua validazioni, controllo date bloccate e anti-duplicato.
+## Demo
 
-- `GET /api/richieste`
-  Restituisce tutte le richieste in ordine decrescente.
+Per mostrare il progetto in portfolio senza dati reali:
 
-- `GET /api/health`
-  Health check applicativo e database.
+- usa [demo/requests.demo.json](/Users/valesulkawa/Documents/New%20project/ferie-permessi-backend-codex/demo/requests.demo.json) come set di richieste esempio;
+- usa [demo/date-bloccate.demo.json](/Users/valesulkawa/Documents/New%20project/ferie-permessi-backend-codex/demo/date-bloccate.demo.json) come calendario bloccato;
+- configura credenziali demo in `.env`, ad esempio `admin@example.com` e password non riusata altrove;
+- punta `MAIL_TO` a una casella tecnica o disattiva i provider mail lasciando vuote le variabili opzionali.
 
-### Admin
-
-- `POST /api/admin/login`
-  Restituisce un JWT admin.
-
-- `GET /api/admin/email-status`
-  Mostra provider email attivo e stato del transporter.
-
-- `GET /api/admin/richieste`
-  Lista richieste con filtri opzionali `nome` e `mese`.
-
-- `DELETE /api/admin/richieste`
-  Elimina richieste selezionate.
-
-- `GET /api/admin/date-bloccate`
-  Elenca le date bloccate.
-
-- `POST /api/admin/date-bloccate`
-  Aggiunge una data bloccata.
-
-- `DELETE /api/admin/date-bloccate/:data`
-  Rimuove una data bloccata.
-
-- `POST /api/admin/test-mail`
-  Invia una mail di test.
-
-- `GET /api/admin/report?month=YYYY-MM`
-  Genera un report `.xlsx` mensile.
-
-## Firebase
-
-`firebase.json` configura:
-
-- `hosting.public = build`
-- rewrite totale verso `index.html`
-- una codebase Functions con source `functions/`
-
-La cartella `functions/` puo' essere avviata separatamente:
+Esempio di import manuale via API, una richiesta per volta:
 
 ```bash
-cd functions
-npm install
-npm run serve
+curl -X POST "$BASE_URL/api/richieste" \
+  -H "Content-Type: application/json" \
+  -d @demo/requests.demo.json
 ```
 
-Al momento `functions/index.js` contiene solo lo scaffold standard Firebase, quindi non replica la logica del backend Express.
+Nota: il file contiene un array JSON; per invii reali via `curl` conviene estrarre un singolo oggetto per richiesta oppure usare un piccolo script di bootstrap.
 
-## Note operative
+## Deployment
 
-- `npm test` non esegue test reali: lo script attuale e' un placeholder.
-- In questa sessione il bootstrap e' stato verificato fino al punto di avvio del server; il bind sulla porta `5001` non era consentito dal sandbox locale.
-- Il repository contiene configurazione legacy e artefatti non piu' allineati al runtime attuale, in particolare i file SQLite e lo scaffold Firebase Functions.
-- Parte della configurazione sensibile email/admin e' ancora hardcoded nel codice applicativo. Conviene spostarla in variabili ambiente prima di usare il progetto in produzione.
+Per un deployment portfolio pulito:
 
-## Worktree e branch di lavoro
+1. Crea un database PostgreSQL dedicato all'ambiente demo.
+2. Imposta tutte le variabili ambiente da [.env.example](/Users/valesulkawa/Documents/New%20project/ferie-permessi-backend-codex/.env.example), sostituendo i valori demo.
+3. Avvia il servizio con `npm start`.
+4. Verifica `GET /api/health` prima di caricare dati demo.
+5. Se vuoi un frontend statico di accompagnamento, pubblica la cartella `build/` come placeholder oppure sostituiscila con la build reale del client.
 
-Per questa inizializzazione e' stato creato un worktree dedicato sul branch:
+Il repository non contiene piu':
 
-- `codex/inizializzazione`
+- email personali;
+- nomi di persone reali;
+- segreti hardcoded;
+- database locali con dati reali;
+- riferimenti nominativi del progetto originale.
 
-Il clone principale e' rimasto su `main`, senza modifiche dirette.
+## Note
+
+- `npm test` e' ancora un placeholder.
+- La cartella `functions/` non replica la logica del backend root.
+- Il branch di lavoro resta `codex/inizializzazione`; `main` non viene modificato direttamente.
