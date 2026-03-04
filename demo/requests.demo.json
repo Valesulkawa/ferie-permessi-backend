@@ -1,0 +1,35 @@
+[
+  {
+    "tipo": "Ferie",
+    "nome": "Giulia Serra",
+    "email": "giulia.serra@example.com",
+    "giorni": ["2026-06-15", "2026-06-19"],
+    "ore": "",
+    "oraInizio": "",
+    "oraFine": "",
+    "motivazione": "Vacanza estiva",
+    "note": "Richiesta demo approvabile"
+  },
+  {
+    "tipo": "Permesso",
+    "nome": "Marco Neri",
+    "email": "marco.neri@example.com",
+    "giorni": ["2026-06-11"],
+    "ore": "09:00-11:30",
+    "oraInizio": "",
+    "oraFine": "",
+    "motivazione": "Visita personale",
+    "note": "Dataset portfolio"
+  },
+  {
+    "tipo": "Mutua",
+    "nome": "Elena Villa",
+    "email": "elena.villa@example.com",
+    "giorni": ["2026-06-03", "2026-06-04"],
+    "ore": "",
+    "oraInizio": "",
+    "oraFine": "",
+    "motivazione": "",
+    "note": "Comunicazione demo"
+  }
+]
